@@ -53,10 +53,12 @@ if sys.platform == 'win32' or (sys.platform == 'darwin' and sys.version_info >= 
     import threading
     proc_class = threading.Thread
     queue_class = Queue.Queue
+    threading_class = proc_class
 else:
     import multiprocessing
     proc_class = multiprocessing.Process
     queue_class = multiprocessing.Queue
+    threading_class = multiprocessing.Process.DummyProcess
 
 
 class TileWorkerPool(object):
@@ -146,16 +148,51 @@ class TileWorker(proc_class):
             except BackoffError:
                 return
 
-class TileSeedWorker(TileWorker):
-    def work_loop(self):
-        while True:
-            tiles = self.tiles_queue.get()
-            if tiles is None:
+
+class TileWorkerThreading(threading_class):
+    def __init__(self, task, tiles_queue, conf):
+        proc_class.__init__(self)
+        proc_class.daemon = True
+        self.task = task
+        self.tile_mgr = task.tile_manager
+        self.tiles_queue = tiles_queue
+        self.conf = conf
+
+    def run(self):
+        with local_base_config(self.conf):
+            try:
+                self.work_loop()
+            except KeyboardInterrupt:
                 return
-            with self.tile_mgr.session():
-                exp_backoff(self.tile_mgr.load_tile_coords, args=(tiles,),
-                    max_repeat=100, max_backoff=600,
-                    exceptions=(SourceError, IOError), ignore_exceptions=(LockTimeout, ))
+            except BackoffError:
+                return
+
+
+_seed_worker_memo = {}
+
+
+def get_tile_seed_worker(use_threading=None):
+    base_class = TileWorker
+    if use_threading is not None:
+        base_class = TileWorkerThreading
+    
+    seed_worker_class = _seed_worker_memo.get(use_threading, None)
+    if seed_worker_class is None:      
+        class _TileSeedWorker(base_class):
+            def work_loop(self):
+                while True:
+                    tiles = self.tiles_queue.get()
+                    if tiles is None:
+                        return
+                    with self.tile_mgr.session():
+                        exp_backoff(self.tile_mgr.load_tile_coords, args=(tiles,),
+                                    max_repeat=100, max_backoff=600,
+                                    exceptions=(SourceError, IOError), ignore_exceptions=(LockTimeout,))
+
+        seed_worker_class = _TileSeedWorker
+        _seed_worker_memo.set(use_threading, seed_worker_class)
+    return seed_worker_class
+
 
 class TileCleanupWorker(TileWorker):
     def work_loop(self):
@@ -477,7 +514,7 @@ class CleanupTask(object):
         return NONE
 
 def seed(tasks, concurrency=2, dry_run=False, skip_geoms_for_last_levels=0,
-    progress_logger=None, cache_locker=None):
+    progress_logger=None, cache_locker=None, ):
     if cache_locker is None:
         cache_locker = DummyCacheLocker()
 
@@ -505,7 +542,7 @@ def seed(tasks, concurrency=2, dry_run=False, skip_geoms_for_last_levels=0,
 
 
 def seed_task(task, concurrency=2, dry_run=False, skip_geoms_for_last_levels=0,
-    progress_logger=None, seed_progress=None):
+    progress_logger=None, seed_progress=None, use_threading=False):
     if task.coverage is False:
         return
     if task.refresh_timestamp is not None:
@@ -516,7 +553,7 @@ def seed_task(task, concurrency=2, dry_run=False, skip_geoms_for_last_levels=0,
     if task.tile_manager.rescale_tiles:
         work_on_metatiles = False
 
-    tile_worker_pool = TileWorkerPool(task, TileSeedWorker, dry_run=dry_run,
+    tile_worker_pool = TileWorkerPool(task, get_tile_seed_worker(use_threading), dry_run=dry_run,
         size=concurrency, progress_logger=progress_logger)
     tile_walker = TileWalker(task, tile_worker_pool, handle_uncached=True,
         skip_geoms_for_last_levels=skip_geoms_for_last_levels, progress_logger=progress_logger,
