@@ -514,7 +514,7 @@ class CleanupTask(object):
         return NONE
 
 def seed(tasks, concurrency=2, dry_run=False, skip_geoms_for_last_levels=0,
-    progress_logger=None, cache_locker=None, ):
+    progress_logger=None, cache_locker=None, use_threading=False):
     if cache_locker is None:
         cache_locker = DummyCacheLocker()
 
@@ -533,7 +533,7 @@ def seed(tasks, concurrency=2, dry_run=False, skip_geoms_for_last_levels=0,
                     start_progress = None
                 seed_progress = SeedProgress(old_progress_identifier=start_progress)
                 seed_task(task, concurrency, dry_run, skip_geoms_for_last_levels, progress_logger,
-                    seed_progress=seed_progress)
+                    seed_progress=seed_progress, use_threading=use_threading)
         except CacheLockedError:
             print('    ...cache is locked, skipping')
             active_tasks = [task] + active_tasks[:-1]
